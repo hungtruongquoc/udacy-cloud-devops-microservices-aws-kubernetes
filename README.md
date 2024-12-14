@@ -129,3 +129,53 @@ Please provide up to 3 sentences for each suggestion. Additional content in your
 ### Best Practices
 * Dockerfile uses an appropriate base image for the application being deployed. Complex commands in the Dockerfile include a comment describing what it is doing.
 * The Docker images use semantic versioning with three numbers separated by dots, e.g. `1.2.1` and  versioning is visible in the  screenshot. See [Semantic Versioning](https://semver.org/) for more details.
+
+# Exploration
+## VPC Information
+
+Run command:
+```
+aws ec2 describe-vpcs --query 'Vpcs[*].[VpcId,CidrBlock,Tags[?Key==`Name`].Value|[0]]' --output table
+```
+print a table of:
+* VPC ID
+* CIDR Block Range
+* Name tag (if one exists)
+
+```
+-------------------------------------------
+|              DescribeVpcs               |
++---------------+-----------------+-------+
+|  <vpc-id> |  <cidr-block>       |  None |
++---------------+-----------------+-------+
+```
+
+Just print default VPC:
+```
+aws ec2 describe-vpcs --filters Name=isDefault,Values=true
+```
+Output can be:
+```json
+{
+    "Vpcs": [
+        {
+            "CidrBlock": "",
+            "DhcpOptionsId": "d",
+            "State": "available",
+            "VpcId": "<vpc-id>",
+            "OwnerId": "<owner-id>",
+            "InstanceTenancy": "default",
+            "CidrBlockAssociationSet": [
+                {
+                    "AssociationId": "<cidr-block-association-id",
+                    "CidrBlock": "",
+                    "CidrBlockState": {
+                        "State": "associated"
+                    }
+                }
+            ],
+            "IsDefault": true
+        }
+    ]
+}
+```
