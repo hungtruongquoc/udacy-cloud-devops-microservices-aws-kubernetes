@@ -1,0 +1,205 @@
+# infrastructure/cloudformation/nested/eks.yaml
+###
+## This template:
+## Creates an EKS cluster with version 1.27
+## Sets up necessary IAM roles for the cluster and nodes
+## Creates a node group with t3.medium instances
+## Enables CloudWatch Container Insights via a custom Lambda function
+## Places nodes in private subnets (imported from VPC stack)
+## Configures cluster logging
+###
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Cluster Stack'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+
+  VpcId:
+    Type: String
+    Description: VPC ID for EKS Cluster
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: First Private Subnet ID for EKS Cluster
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second Private Subnet ID for EKS Cluster
+
+Resources:
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - arn:aws:iam::aws:policy/AmazonEKSVPCResourceController
+
+  NodeGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  ClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EKS cluster
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-eks-cluster-sg
+
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub ${Environment}-eks-cluster
+      Version: '1.27'
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref ClusterSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+
+  NodeGroupKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub ${Environment}-eks-keypair
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: !Sub ${Environment}-node-group
+      NodeRole: !GetAtt NodeGroupRole.Arn
+      ScalingConfig:
+        MinSize: 2
+        DesiredSize: 2
+        MaxSize: 4
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      InstanceTypes:
+        - t3.medium
+      AmiType: AL2_x86_64
+      RemoteAccess:
+        Ec2SshKey: !Ref NodeGroupKeyPair
+      Tags:
+        Name: !Sub ${Environment}-eks-node
+
+  # Add CloudWatch Container Insights
+  ContainerInsights:
+    Type: Custom::EKSContainerInsights
+    DependsOn: NodeGroup
+    Properties:
+      ServiceToken: !GetAtt ContainerInsightsFunction.Arn
+      ClusterName: !Ref EKSCluster
+
+  ContainerInsightsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt ContainerInsightsRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          def handler(event, context):
+              if event['RequestType'] in ['Create', 'Update']:
+                  try:
+                      eks = boto3.client('eks')
+                      eks.update_cluster_config(
+                          name=event['ResourceProperties']['ClusterName'],
+                          logging={'clusterLogging': [{'types': ['api', 'audit', 'authenticator', 'controllerManager', 'scheduler'], 'enabled': True}]}
+                      )
+                      time.sleep(10)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  except Exception as e:
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+              else:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 128
+
+  ContainerInsightsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EKSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - eks:UpdateClusterConfig
+                Resource: !GetAtt EKSCluster.Arn
+
+Outputs:
+  ClusterName:
+    Description: EKS cluster name
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterName
+
+  ClusterEndpoint:
+    Description: EKS cluster endpoint
+    Value: !GetAtt EKSCluster.Endpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterEndpoint
+
+  ClusterSecurityGroupId:
+    Description: Security group for EKS cluster
+    Value: !Ref ClusterSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterSecurityGroupId
+
+  NodeGroupRoleArn:
+    Description: Role ARN for EKS Node Group
+    Value: !GetAtt NodeGroupRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-NodeGroupRoleArn

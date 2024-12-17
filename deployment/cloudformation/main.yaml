@@ -1,0 +1,74 @@
+# infrastructure/cloudformation/main.yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Main stack for the complete application infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Deployment environment
+
+Resources:
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: nested/vpc.yaml
+      Parameters:
+        Environment: !Ref Environment
+
+  EKSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: VPCStack
+    Properties:
+      TemplateURL: nested/eks.yaml
+      Parameters:
+        VpcId: !GetAtt VPCStack.Outputs.VpcId
+        Environment: !Ref Environment
+
+  RDSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: VPCStack
+    Properties:
+      TemplateURL: nested/rds.yaml
+      Parameters:
+        VpcId: !GetAtt VPCStack.Outputs.VpcId
+        Environment: !Ref Environment
+
+  ECRStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: nested/ecr.yaml
+      Parameters:
+        Environment: !Ref Environment
+
+  CodeBuildStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: ECRStack
+    Properties:
+      TemplateURL: nested/codebuild.yaml
+      Parameters:
+        Environment: !Ref Environment
+        EcrRepository: !GetAtt ECRStack.Outputs.RepositoryName
+
+  CloudWatchStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: EKSStack
+    Properties:
+      TemplateURL: nested/cloudwatch.yaml
+      Parameters:
+        ClusterName: !GetAtt EKSStack.Outputs.ClusterName
+        Environment: !Ref Environment
+
+Outputs:
+  ClusterName:
+    Description: EKS Cluster Name
+    Value: !GetAtt EKSStack.Outputs.ClusterName
+
+  DatabaseEndpoint:
+    Description: RDS Endpoint
+    Value: !GetAtt RDSStack.Outputs.DbEndpoint
+
+  RepositoryURI:
+    Description: ECR Repository URI
+    Value: !GetAtt ECRStack.Outputs.RepositoryUri

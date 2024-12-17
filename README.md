@@ -130,6 +130,98 @@ Please provide up to 3 sentences for each suggestion. Additional content in your
 * Dockerfile uses an appropriate base image for the application being deployed. Complex commands in the Dockerfile include a comment describing what it is doing.
 * The Docker images use semantic versioning with three numbers separated by dots, e.g. `1.2.1` and  versioning is visible in the  screenshot. See [Semantic Versioning](https://semver.org/) for more details.
 
+# Deployment
+Assume a VPC is created
+## Networking Deployment
+Run following command to create network configuration:
+
+```
+aws cloudformation create-stack \
+  --stack-name eks-subnets \
+  --template-body file://deployment/cloudformation/resources/networking.yaml \
+  --parameters \
+    ParameterKey=Environment,ParameterValue=dev \
+    ParameterKey=VpcId,ParameterValue=vpc-xxxx
+```
+
+Run following commands to check for creation of resources:
+
+```
+# For VPC
+aws ec2 describe-vpcs --query 'Vpcs[*].[VpcId,CidrBlock,Tags[?Key==`Name`].Value[]]' --output table
+
+# For Subnets
+aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=<vpc-id>" \
+  --query 'Subnets[*].[SubnetId,CidrBlock,AvailabilityZone,Tags[?Key==`Name`].Value|[0]]' \
+  --output table
+  
+# For Internet Gateway
+aws ec2 describe-internet-gateways \
+  --filters "Name=attachment.vpc-id,Values=<vpc-id>" \
+  --query 'InternetGateways[*].[InternetGatewayId,Tags[?Key==`Name`].Value[]]' \
+  --output table
+  
+# For NAT Gateway
+aws ec2 describe-nat-gateways \
+  --filter "Name=vpc-id,Values=<vpc-id>" \
+  --query 'NatGateways[*].[NatGatewayId,SubnetId,State]' \
+  --output table
+  
+# For Route Tables
+aws ec2 describe-route-tables \
+  --filters "Name=vpc-id,Values=<vpc-id>" \
+  --query 'RouteTables[*].[RouteTableId,Tags[?Key==`Name`].Value[]]' \
+  --output table
+  
+# CloudFormation Status and Outputs:
+# Check stack status
+aws cloudformation describe-stacks \
+  --stack-name eks-subnets \
+  --query 'Stacks[*].[StackName,StackStatus]' \
+  --output table
+
+# Check stack outputs
+aws cloudformation describe-stacks \
+  --stack-name eks-subnets \
+  --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+  --output table
+  
+aws cloudformation describe-stacks \
+  --stack-name eks-subnets \
+  --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+  --output table
+```
+
+## EKS Deployment
+```
+aws cloudformation create-stack \
+--stack-name eks-cluster \
+--template-body file://eks.yaml \
+--parameters \
+ParameterKey=Environment,ParameterValue=dev \
+ParameterKey=VpcId,ParameterValue=<vpc-id> \
+ParameterKey=PrivateSubnet1,ParameterValue=subnet-XXXX \
+ParameterKey=PrivateSubnet2,ParameterValue=subnet-YYYY \
+--capabilities CAPABILITY_IAM
+```
+Command to check for EKS creation:
+
+```
+# List EKS clusters
+aws eks list-clusters
+
+# Describe specific cluster
+aws eks describe-cluster --name dev-eks-cluster
+
+# Get node groups
+aws eks list-nodegroups --cluster-name dev-eks-cluster
+
+# List roles with 'eks' in the name
+aws iam list-roles \
+  --query 'Roles[?contains(RoleName, `eks`)].[RoleName,Arn]' \
+  --output table
+```
 # Exploration
 ## VPC Information
 
@@ -177,5 +269,47 @@ Output can be:
             "IsDefault": true
         }
     ]
+}
+```
+### CIDR Block Information
+Use this to list CIDR Block of your VPC
+```
+aws ec2 describe-vpcs --query 'Vpcs[*].[VpcId,CidrBlock]' --output table
+```
+
+```
+aws ec2 describe-subnets \
+--filters "Name=vpc-id,Values=vpc-7aa76207" \
+--query 'Subnets[*].[SubnetId,CidrBlock,AvailabilityZone]' \
+--output table
+```
+
+```
+aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=vpc-7aa76207" \
+  --query 'Subnets[*].[SubnetId,CidrBlock,AvailabilityZone,Tags[?Key==`Name`].Value|[0]]' \
+  --output table
+```
+## Subnet Information
+
+```
+aws ec2 describe-subnets
+```
+
+```
+aws ec2 describe-subnets --filters "Name=vpc-id,Values=vpc-xxxxx"
+```
+
+## Internet Gateway Information
+
+```
+aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=vpc-7aa76207"
+```
+
+Output:
+
+```json
+{
+    "InternetGateways": []
 }
 ```
