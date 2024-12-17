@@ -280,6 +280,24 @@ kubectl get storageclass
 kubectl get namespaces
 ```
 
+# Delete Stacks
+
+```bash
+# Delete the EKS CloudFormation stack
+aws cloudformation delete-stack --stack-name eks-cluster
+
+# Delete the networking stack
+aws cloudformation delete-stack --stack-name eks-subnets
+```
+
+# Use Scripts for Provisioning and Tearing Down Infrastructure
+
+Make sure these scripts executable, run following commands at root of the project:
+```bash
+chmod +x setup-eks.sh
+chmod +x teardown-eks.sh
+```
+
 # Exploration
 ## VPC Information
 
