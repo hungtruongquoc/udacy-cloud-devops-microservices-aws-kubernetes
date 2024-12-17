@@ -222,6 +222,64 @@ aws iam list-roles \
   --query 'Roles[?contains(RoleName, `eks`)].[RoleName,Arn]' \
   --output table
 ```
+
+## kubeconfig Update
+
+```
+aws eks --region us-east-1 update-kubeconfig --name <cluster-name>
+```
+
+Output should be:
+
+```
+Added new context arn:aws:eks:us-east-1:<id>:cluster/<cluster-name> to <local path to .kube/config>
+```
+
+The crucial role of the config:
+
+The ~/.kube/config file is crucial for `kubectl` to communicate with your EKS cluster. Here's how it works:
+
+When you ran `aws eks update-kubeconfig`, it:
+
+* Gets the cluster endpoint from AWS
+* Gets authentication details
+* Updates ~/.kube/config with this information
+
+The `kubeconfig` file contains:
+
+* Cluster information (API server endpoint)
+* Authentication details (AWS IAM credentials)
+* Context (which connects cluster and user details)
+
+When you run `kubectl` commands:
+
+* kubectl reads the config file
+* Uses the AWS IAM credentials to authenticate
+* Makes API calls to the cluster endpoint
+
+Command to verify context:
+
+```bash
+# View current context
+kubectl config current-context
+
+# View full config details
+kubectl config view
+
+```
+
+## Kubernetes Verification
+
+```
+kubectl get nodes -o wide
+
+kubectl get pods -n kube-system
+
+kubectl get storageclass
+
+kubectl get namespaces
+```
+
 # Exploration
 ## VPC Information
 
