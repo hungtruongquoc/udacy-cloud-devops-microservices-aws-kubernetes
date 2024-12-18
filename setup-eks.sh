@@ -1,9 +1,15 @@
 #!/bin/bash
 
+# Start timing
+start_time=$(date +%s)
+
+echo "Starting setup process at $(date)"
+echo "-----------------------------------"
+
 echo "Creating EKS networking stack..."
 aws cloudformation create-stack \
   --stack-name eks-subnets \
-  --template-body file://infrastructure/cloudformation/nested/subnets.yaml \
+  --template-body file://deployment/cloudformation/resources/networking.yaml \
   --parameters \
     ParameterKey=Environment,ParameterValue=dev \
     ParameterKey=VpcId,ParameterValue=vpc-7aa76207
@@ -22,10 +28,14 @@ PRIVATE_SUBNET_2=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnet2Id`].OutputValue' \
   --output text)
 
+networking_time=$(date +%s)
+echo "Networking stack completed in $((networking_time - start_time)) seconds"
+echo "-----------------------------------"
+
 echo "Creating EKS cluster stack..."
 aws cloudformation create-stack \
   --stack-name eks-cluster \
-  --template-body file://infrastructure/cloudformation/nested/eks.yaml \
+  --template-body file://deployment/cloudformation/resources/eks.yaml \
   --capabilities CAPABILITY_IAM \
   --parameters \
     ParameterKey=Environment,ParameterValue=dev \
@@ -36,10 +46,21 @@ aws cloudformation create-stack \
 echo "Waiting for EKS cluster stack to complete..."
 aws cloudformation wait stack-create-complete --stack-name eks-cluster
 
+eks_time=$(date +%s)
+echo "EKS cluster stack completed in $((eks_time - networking_time)) seconds"
+echo "-----------------------------------"
+
 echo "Updating kubeconfig..."
 aws eks --region us-east-1 update-kubeconfig --name dev-eks-cluster
 
 echo "Verifying cluster access..."
 kubectl get nodes
 
-echo "Setup complete!"
+end_time=$(date +%s)
+echo "-----------------------------------"
+echo "Setup completed at $(date)"
+echo "Total setup time: $((end_time - start_time)) seconds"
+echo "Breakdown:"
+echo "  Networking stack: $((networking_time - start_time)) seconds"
+echo "  EKS cluster stack: $((eks_time - networking_time)) seconds"
+echo "  Final configuration: $((end_time - eks_time)) seconds"

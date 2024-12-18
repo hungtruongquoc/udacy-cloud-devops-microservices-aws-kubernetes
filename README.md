@@ -132,6 +132,17 @@ Please provide up to 3 sentences for each suggestion. Additional content in your
 
 # Deployment
 Assume a VPC is created
+## Prerequisites
+
+Make sure `eksctl`, `helm` are installed
+
+Install `eksctl`:
+```bash
+brew tap weaveworks/tap
+brew install weaveworks/tap/eksctl
+```
+
+
 ## Networking Deployment
 Run following command to create network configuration:
 
@@ -223,7 +234,7 @@ aws iam list-roles \
   --output table
 ```
 
-## kubeconfig Update
+### kubeconfig Update
 
 ```
 aws eks --region us-east-1 update-kubeconfig --name <cluster-name>
@@ -268,7 +279,7 @@ kubectl config view
 
 ```
 
-## Kubernetes Verification
+### Kubernetes Verification
 
 ```
 kubectl get nodes -o wide
@@ -296,6 +307,179 @@ Make sure these scripts executable, run following commands at root of the projec
 ```bash
 chmod +x setup-eks.sh
 chmod +x teardown-eks.sh
+```
+
+# Deploy Database Service
+
+## Prerequisites
+Create the OIDC provider:
+
+```bash
+eksctl utils associate-iam-oidc-provider \
+    --cluster dev-eks-cluster \
+    --region us-east-1 \
+    --approve
+```
+
+The expected output:
+```
+2024-12-17 22:53:09 [ℹ]  will create IAM Open ID Connect provider for cluster "dev-eks-cluster" in "us-east-1"
+2024-12-17 22:53:09 [✔]  created IAM Open ID Connect provider for cluster "dev-eks-cluster" in "us-east-1"
+```
+
+Verify the creation:
+
+```bash
+eksctl utils describe-stacks --region us-east-1 --cluster dev-eks-cluster
+```
+
+with output:
+
+```
+2024-12-17 22:54:15 [!]  only 0 stacks found, for a ready-to-use cluster there should be at least 2
+```
+
+Create an IAM service account for the EBS CSI Driver:
+
+```bash
+eksctl create iamserviceaccount \
+    --name ebs-csi-controller-sa \
+    --namespace kube-system \
+    --cluster dev-eks-cluster \
+    --attach-policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
+    --approve \
+    --region us-east-1
+```
+
+The output should be:
+
+```
+2024-12-17 22:56:06 [ℹ]  1 iamserviceaccount (kube-system/ebs-csi-controller-sa) was included (based on the include/exclude rules)
+2024-12-17 22:56:06 [!]  serviceaccounts that exist in Kubernetes will be excluded, use --override-existing-serviceaccounts to override
+2024-12-17 22:56:06 [ℹ]  1 task: { 
+    2 sequential sub-tasks: { 
+        create IAM role for serviceaccount "kube-system/ebs-csi-controller-sa",
+        create serviceaccount "kube-system/ebs-csi-controller-sa",
+    } }2024-12-17 22:56:06 [ℹ]  building iamserviceaccount stack "eksctl-dev-eks-cluster-addon-iamserviceaccount-kube-system-ebs-csi-controller-sa"
+2024-12-17 22:56:06 [ℹ]  deploying stack "eksctl-dev-eks-cluster-addon-iamserviceaccount-kube-system-ebs-csi-controller-sa"
+2024-12-17 22:56:06 [ℹ]  waiting for CloudFormation stack "eksctl-dev-eks-cluster-addon-iamserviceaccount-kube-system-ebs-csi-controller-sa"
+2024-12-17 22:56:36 [ℹ]  waiting for CloudFormation stack "eksctl-dev-eks-cluster-addon-iamserviceaccount-kube-system-ebs-csi-controller-sa"
+2024-12-17 22:56:36 [ℹ]  created serviceaccount "kube-system/ebs-csi-controller-sa"
+```
+
+## Scripts
+
+Make sure these scripts executable, run following commands at root of the project:
+```bash
+chmod +x postgres-helm-startup.sh
+chmod +x postgres-helm-cleanup.sh
+```
+
+Start up the service using `./postgres-helm-startup.sh`
+
+Clean up the service using `./postgres-helm-cleanup.sh`
+
+Verify the cleaning up:
+
+To ensure that all resources, including the PersistentVolumeClaim (PVC), are deleted after running your cleanup script, you can follow these steps:
+
+### Verify Pods
+
+Check that no pods associated with your PostgreSQL setup are running:
+
+kubectl get pods --all-namespaces | grep postgresql
+
+	•	If no results are returned, all related pods have been deleted.
+
+### Verify Services
+
+Check that the PostgreSQL service has been removed:
+
+kubectl get svc --all-namespaces | grep postgresql
+
+	•	If no results are returned, the service has been deleted.
+
+### Verify Deployments and StatefulSets
+
+Ensure that no StatefulSets or Deployments associated with PostgreSQL exist:
+
+kubectl get statefulsets --all-namespaces | grep postgresql
+kubectl get deployments --all-namespaces | grep postgresql
+
+	•	If no results are returned, these resources have been removed.
+
+### Verify PVC
+
+Check that the PersistentVolumeClaim has been deleted:
+
+kubectl get pvc --all-namespaces | grep postgresql
+
+	•	If no results are returned, the PVC has been deleted.
+
+### Verify PersistentVolumes
+
+Sometimes, deleting a PVC does not immediately delete the corresponding PersistentVolume (depending on the reclaimPolicy):
+
+kubectl get pv | grep postgresql
+
+	•	If no results are returned, the PersistentVolume has been deleted.
+	•	If results appear, check the status of the PV:
+
+kubectl describe pv <PV_NAME>
+
+If the status is Released or Available, manually delete it:
+
+kubectl delete pv <PV_NAME>
+
+### Verify Helm Release
+
+Ensure that the Helm release has been fully removed:
+
+helm list --all-namespaces | grep postgresql
+
+	•	If no results are returned, the Helm release has been deleted.
+
+### Check for Other Resources
+
+Check for any lingering ConfigMaps, Secrets, or other Kubernetes resources:
+
+kubectl get configmaps --all-namespaces | grep postgresql
+kubectl get secrets --all-namespaces | grep postgresql
+
+Manually delete any lingering resources if necessary:
+
+kubectl delete configmap <CONFIGMAP_NAME>
+kubectl delete secret <SECRET_NAME>
+
+### Comprehensive Cleanup
+
+If you want to ensure no resources remain:
+
+kubectl get all --all-namespaces | grep postgresql
+
+This will show any remaining PostgreSQL-related resources.
+
+### Clean Logs for Debugging
+
+(Optional) Check the logs of your cleanup script to ensure there were no errors during execution.
+
+Example Cleanup Script Verification:
+
+To summarize, after cleanup, these commands should return no results:
+
+kubectl get pods --all-namespaces | grep postgresql
+kubectl get svc --all-namespaces | grep postgresql
+kubectl get pvc --all-namespaces | grep postgresql
+kubectl get pv | grep postgresql
+helm list --all-namespaces | grep postgresql
+
+If all these checks are clear, your cleanup was successful, and all PostgreSQL-related resources have been deleted. Let me know if you need help automating this verification process!
+## Manual Cleaning Up (If Necessary)
+
+Delete the PVC with:
+
+```bash
+kubectl delete pvc data-postgresql-0
 ```
 
 # Exploration
@@ -389,3 +573,57 @@ Output:
     "InternetGateways": []
 }
 ```
+
+## Persistent Volume and Persistent Volume Claim
+
+Persistent Volumes (PV) and Persistent Volume Claims (PVC) are needed for database services because:
+
+Data Persistence:
+
+* Pods are ephemeral (temporary) in Kubernetes
+* If a pod crashes or restarts, all data inside the container is lost
+* PV provides persistent storage that survives pod restarts
+
+
+Storage Management:
+
+* PV defines the actual storage resource (like an AWS EBS volume)
+* PVC is the request for that storage by the application
+
+This separation allows:
+
+* Admins to manage storage resources (PV)
+* Developers to request storage (PVC) without knowing storage details
+
+## Port Forwarding from a Pod
+
+Port forwarding in this context serves as a way to securely access the PostgreSQL database running in your Kubernetes cluster from your local machine. Here's why it's important:
+
+1. Security:
+    - The PostgreSQL pod is not directly exposed to the internet
+    - Port forwarding creates a secure tunnel between your local machine and the pod
+
+2. Local Development:
+    - Allows you to connect to the database using local tools (like pgAdmin)
+    - You can run database migrations from your local machine
+    - You can test database connections from your local environment
+
+In the instructions:
+```bash
+kubectl port-forward service/postgresql-service 5433:5432 &
+```
+This means:
+- Local port 5433 -> forwards to -> Pod's port 5432
+- You can then connect using: `localhost:5433`
+- The `&` runs it in background
+
+Example usage after port forwarding:
+```bash
+# Connect using psql from local machine
+PGPASSWORD="mypassword" psql --host 127.0.0.1 -U myuser -d mydatabase -p 5433
+
+# Run migrations or seed files
+psql --host 127.0.0.1 -p 5433 < your_seed_file.sql
+```
+
+Without port forwarding, you wouldn't be able to access the database from outside the Kubernetes cluster since it's internal to the cluster network.
