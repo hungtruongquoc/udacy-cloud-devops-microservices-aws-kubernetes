@@ -6,6 +6,24 @@ start_time=$(date +%s)
 echo "Starting setup process at $(date)"
 echo "-----------------------------------"
 
+echo "Creating ECR repository..."
+aws ecr create-repository \
+    --repository-name dev-application \
+    --image-scanning-configuration scanOnPush=true \
+    --encryption-configuration encryptionType=AES256 \
+    --region us-east-1 || true
+
+# Get the repository URI for later use
+ECR_REPO_URI=$(aws ecr describe-repositories \
+    --repository-names dev-application \
+    --query 'repositories[0].repositoryUri' \
+    --output text)
+
+ecr_time=$(date +%s)
+echo "ECR repository setup completed in $((ecr_time - start_time)) seconds"
+echo "ECR Repository URI: $ECR_REPO_URI"
+echo "-----------------------------------"
+
 echo "Creating EKS networking stack..."
 aws cloudformation create-stack \
   --stack-name eks-subnets \
@@ -29,7 +47,7 @@ PRIVATE_SUBNET_2=$(aws cloudformation describe-stacks \
   --output text)
 
 networking_time=$(date +%s)
-echo "Networking stack completed in $((networking_time - start_time)) seconds"
+echo "Networking stack completed in $((networking_time - ecr_time)) seconds"
 echo "-----------------------------------"
 
 echo "Creating EKS cluster stack..."
@@ -61,6 +79,7 @@ echo "-----------------------------------"
 echo "Setup completed at $(date)"
 echo "Total setup time: $((end_time - start_time)) seconds"
 echo "Breakdown:"
+echo "  ECR repository: $((ecr_time - eks_time)) seconds"
 echo "  Networking stack: $((networking_time - start_time)) seconds"
 echo "  EKS cluster stack: $((eks_time - networking_time)) seconds"
 echo "  Final configuration: $((end_time - eks_time)) seconds"
