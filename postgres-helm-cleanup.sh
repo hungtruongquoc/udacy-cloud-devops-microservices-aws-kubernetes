@@ -26,6 +26,25 @@ echo "Waiting for PersistentVolumes (PVs) to be released..."
 sleep 5
 kubectl get pv | grep postgresql | awk '{print $1}' | xargs -r kubectl delete pv || true
 
+# Clean up EBS CSI Driver components
+echo "Cleaning up EBS CSI Driver..."
+helm uninstall aws-ebs-csi-driver -n kube-system || true
+
+# Wait for EBS CSI Driver pods to be deleted
+echo "Waiting for EBS CSI Driver pods to be deleted..."
+kubectl wait --for=delete pod -l app.kubernetes.io/name=aws-ebs-csi-driver -n kube-system --timeout=300s || true
+kubectl wait --for=delete pod -l app=ebs-csi-controller -n kube-system --timeout=300s || true
+
+# Delete the service account
+echo "Cleaning up service account..."
+SA_NAME="ebs-csi-controller-sa"
+kubectl delete serviceaccount -n kube-system $SA_NAME || true
+
+# Delete any orphaned resources
+echo "Checking for orphaned resources..."
+kubectl delete pods -n kube-system -l app.kubernetes.io/name=aws-ebs-csi-driver --force --grace-period=0 2>/dev/null || true
+kubectl delete pods -n kube-system -l app=ebs-csi-controller --force --grace-period=0 2>/dev/null || true
+
 end_time=$(date +%s)
 
 echo "-----------------------------------"

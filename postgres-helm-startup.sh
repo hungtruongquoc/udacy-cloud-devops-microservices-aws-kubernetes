@@ -6,16 +6,42 @@ echo "-----------------------------------"
 # Start timing
 start_time=$(date +%s)
 
+# Verify the IAM role exists and is properly configured
+echo "Verifying IAM role and service account..."
+ROLE_NAME="eksctl-dev-eks-cluster-addon-iamserviceaccoun-Role1-Khm3TJWefsFZ"
+SA_NAME="ebs-csi-controller-sa"
+
+# Delete old service account if it exists
+kubectl delete serviceaccount -n kube-system $SA_NAME 2>/dev/null || true
+
+# Create service account and associate with existing role
+kubectl create serviceaccount -n kube-system $SA_NAME
+kubectl annotate serviceaccount -n kube-system $SA_NAME \
+    eks.amazonaws.com/role-arn=arn:aws:iam::723567309652:role/$ROLE_NAME --overwrite
+
+# Explicitly enable automount for service account tokens
+echo "Enabling automount of service account tokens..."
+kubectl patch serviceaccount $SA_NAME -n kube-system \
+    -p '{"automountServiceAccountToken": true}'
+
 echo "Installing EBS CSI Driver..."
 # Add aws-ebs-csi-driver repo
 helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
 helm repo update
 
+
 # Install EBS CSI Driver
+echo "Installing EBS CSI Driver..."
+helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver || true
+helm repo update
 helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver \
     --namespace kube-system \
     --set controller.serviceAccount.create=false \
-    --set controller.serviceAccount.name=ebs-csi-controller-sa || true
+    --set controller.serviceAccount.name=$SA_NAME || true
+
+# Restart EBS CSI Driver to pick up new service account settings
+echo "Restarting EBS CSI Driver pods..."
+kubectl rollout restart deployment ebs-csi-controller -n kube-system
 
 # Wait for EBS CSI Driver pods to be ready
 echo "Waiting for EBS CSI Driver pods to be ready..."
@@ -66,7 +92,24 @@ helm install postgresql bitnami/postgresql \
   --set primary.livenessProbe.initialDelaySeconds=60 \
   --set primary.livenessProbe.periodSeconds=10 \
   --set primary.livenessProbe.timeoutSeconds=5 \
-  --set primary.livenessProbe.failureThreshold=6
+  --set primary.livenessProbe.failureThreshold=6 \
+  --set primary.resources.requests.cpu=100m \
+  --set primary.resources.requests.memory=128Mi \
+  --set primary.resources.limits.cpu=150m \
+  --set primary.resources.limits.memory=192Mi \
+  --set primary.persistence.enabled=true \
+  --set primary.persistence.mountPath=/bitnami/postgresql \
+  --wait
+
+# Add more detailed error checking
+if [ $? -ne 0 ]; then
+    echo "Error: PostgreSQL installation failed"
+    echo "Checking pod events..."
+    kubectl describe pod -l app.kubernetes.io/name=postgresql
+    echo "Checking PVC events..."
+    kubectl describe pvc data-postgresql-0
+    exit 1
+fi
 
 echo "Checking pod status..."
 kubectl get pods -l app.kubernetes.io/name=postgresql -o wide
