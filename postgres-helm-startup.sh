@@ -197,20 +197,23 @@ fi
 end_time=$(date +%s)
 
 # Cleanup port forwarding
-kill $PORT_FORWARD_PID
+# Kill port forwarding after seeding
+kill $PORT_FORWARD_PID || true
 
+end_time=$(date +%s)
 echo "-----------------------------------"
 echo "PostgreSQL setup and seeding completed at $(date)"
 echo "Total setup time: $((end_time - start_time)) seconds"
 echo "Installation time: $((install_time - start_time)) seconds"
 echo "Seeding time: $((end_time - install_time)) seconds"
 echo ""
-echo "Connection Information:"
-echo "  Host: 127.0.0.1"
-echo "  Port: 5433"
-echo "  Database: $DB_NAME"
-echo "  Username: $DB_USER"
-echo "  Password: $DB_PASSWORD"
+echo "PostgreSQL is running successfully in your cluster!"
 echo ""
 echo "To connect to the database:"
-echo "PGPASSWORD=$DB_PASSWORD psql -h 127.0.0.1 -U $DB_USER -d $DB_NAME -p 5433"
+echo "1. Start port forwarding:"
+echo "   kubectl port-forward --namespace default svc/postgresql 5433:5432"
+echo ""
+echo "2. In another terminal window, connect using:"
+echo "   PGPASSWORD=$DB_PASSWORD psql -h 127.0.0.1 -U $DB_USER -d $DB_NAME -p 5433"
+echo ""
+echo "Note: Port forwarding must be active to connect from your local machine."
