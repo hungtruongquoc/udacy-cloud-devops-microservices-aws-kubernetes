@@ -6,9 +6,33 @@ echo "-----------------------------------"
 # Start timing
 start_time=$(date +%s)
 
+# First verify OIDC and EBS CSI Driver setup
+echo "Verifying prerequisites..."
+
+# Check OIDC provider
+echo "Checking OIDC provider..."
+OIDC_PROVIDER=$(aws eks describe-cluster --name dev-eks-cluster \
+    --query 'cluster.identity.oidc.issuer' \
+    --output text | sed 's|https://||')
+if ! aws iam list-open-id-connect-providers | grep -q $(echo $OIDC_PROVIDER | awk -F/ '{print $NF}'); then
+    echo "❌ OIDC provider not found. Please run the EKS setup script first."
+    exit 1
+fi
+
 # Verify the IAM role exists and is properly configured
 echo "Verifying IAM role and service account..."
-ROLE_NAME="eksctl-dev-eks-cluster-addon-iamserviceaccoun-Role1-Khm3TJWefsFZ"
+# Get the role ARN from eksctl
+ROLE_ARN=$(eksctl get iamserviceaccount \
+    --cluster dev-eks-cluster \
+    --name ebs-csi-controller-sa \
+    --namespace kube-system \
+    -o json | jq -r '.[].status.roleARN')
+
+if [ -z "$ROLE_ARN" ]; then
+    echo "❌ EBS CSI Driver IAM role not found. Please run the EKS setup script first."
+    exit 1
+fi
+
 SA_NAME="ebs-csi-controller-sa"
 
 # Delete old service account if it exists
@@ -17,38 +41,51 @@ kubectl delete serviceaccount -n kube-system $SA_NAME 2>/dev/null || true
 # Create service account and associate with existing role
 kubectl create serviceaccount -n kube-system $SA_NAME
 kubectl annotate serviceaccount -n kube-system $SA_NAME \
-    eks.amazonaws.com/role-arn=arn:aws:iam::723567309652:role/$ROLE_NAME --overwrite
+    eks.amazonaws.com/role-arn=$ROLE_ARN --overwrite
 
 # Explicitly enable automount for service account tokens
 echo "Enabling automount of service account tokens..."
 kubectl patch serviceaccount $SA_NAME -n kube-system \
     -p '{"automountServiceAccountToken": true}'
 
-echo "Installing EBS CSI Driver..."
-# Add aws-ebs-csi-driver repo
-helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
-helm repo update
+# Verify and install EBS CSI Driver
+echo "Verifying EBS CSI Driver..."
+if ! helm list -n kube-system | grep -q "aws-ebs-csi-driver"; then
+    echo "Installing EBS CSI Driver..."
+    helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+    helm repo update
 
+    helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver \
+        --namespace kube-system \
+        --set controller.serviceAccount.create=false \
+        --set controller.serviceAccount.name=$SA_NAME
 
-# Install EBS CSI Driver
-echo "Installing EBS CSI Driver..."
-helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver || true
-helm repo update
-helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver \
-    --namespace kube-system \
-    --set controller.serviceAccount.create=false \
-    --set controller.serviceAccount.name=$SA_NAME || true
+    # Wait for EBS CSI Driver pods to be ready
+    echo "Waiting for EBS CSI Driver pods to be ready..."
+    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=aws-ebs-csi-driver -n kube-system --timeout=300s
+else
+    echo "EBS CSI Driver already installed"
+fi
 
-# Restart EBS CSI Driver to pick up new service account settings
-echo "Restarting EBS CSI Driver pods..."
-kubectl rollout restart deployment ebs-csi-controller -n kube-system
-
-# Wait for EBS CSI Driver pods to be ready
-echo "Waiting for EBS CSI Driver pods to be ready..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=aws-ebs-csi-driver -n kube-system --timeout=300s
+# Verify storage class
+echo "Verifying gp2 storage class..."
+if ! kubectl get sc gp2 &>/dev/null; then
+    echo "Creating gp2 storage class..."
+    kubectl apply -f - <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp2
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp2
+  encrypted: "true"
+volumeBindingMode: WaitForFirstConsumer
+EOF
+fi
 
 ebs_install_time=$(date +%s)
-echo "EBS CSI Driver installation completed in $((ebs_install_time - start_time)) seconds"
+echo "EBS setup completed in $((ebs_install_time - start_time)) seconds"
 echo "-----------------------------------"
 
 # Cleanup any existing installation
@@ -99,15 +136,21 @@ helm install postgresql bitnami/postgresql \
   --set primary.resources.limits.memory=192Mi \
   --set primary.persistence.enabled=true \
   --set primary.persistence.mountPath=/bitnami/postgresql \
+  --timeout 600s \
   --wait
 
-# Add more detailed error checking
+# Enhanced error checking
 if [ $? -ne 0 ]; then
     echo "Error: PostgreSQL installation failed"
     echo "Checking pod events..."
     kubectl describe pod -l app.kubernetes.io/name=postgresql
     echo "Checking PVC events..."
     kubectl describe pvc data-postgresql-0
+    echo "Checking storage class..."
+    kubectl describe sc gp2
+    echo "Checking EBS CSI Driver pods..."
+    kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-ebs-csi-driver
+    kubectl describe pods -n kube-system -l app.kubernetes.io/name=aws-ebs-csi-driver
     exit 1
 fi
 
@@ -126,16 +169,30 @@ echo "Setting up port forwarding..."
 kubectl port-forward --namespace default svc/postgresql 5433:5432 &
 PORT_FORWARD_PID=$!
 
-# Wait a bit for port-forward to establish
+# Wait for port-forward to establish
 sleep 5
 
-# Seed the database
-echo "Seeding the database..."
-export DB_PASSWORD=$DB_PASSWORD
-for file in db/*.sql; do
-  echo "Running seed file: $file"
-  PGPASSWORD="$DB_PASSWORD" psql --host 127.0.0.1 -U $DB_USER -d $DB_NAME -p 5433 < "$file"
-done
+# Test database connection
+echo "Testing database connection..."
+PGPASSWORD="$DB_PASSWORD" psql --host 127.0.0.1 -U $DB_USER -d $DB_NAME -p 5433 -c "\l" &>/dev/null
+if [ $? -eq 0 ]; then
+    echo "✅ Database connection successful"
+else
+    echo "❌ Database connection failed"
+    exit 1
+fi
+
+# Seed the database if db directory exists
+if [ -d "db" ] && [ "$(ls -A db/*.sql 2>/dev/null)" ]; then
+    echo "Seeding the database..."
+    export DB_PASSWORD=$DB_PASSWORD
+    for file in db/*.sql; do
+        echo "Running seed file: $file"
+        PGPASSWORD="$DB_PASSWORD" psql --host 127.0.0.1 -U $DB_USER -d $DB_NAME -p 5433 < "$file"
+    done
+else
+    echo "No seed files found in db directory"
+fi
 
 end_time=$(date +%s)
 

@@ -6,6 +6,22 @@ start_time=$(date +%s)
 echo "Starting setup process at $(date)"
 echo "-----------------------------------"
 
+verify_component() {
+    local component=$1
+    local check_command=$2
+    local error_message=$3
+
+    echo "Verifying $component..."
+    if eval "$check_command"; then
+        echo "✅ $component verification successful"
+        return 0
+    else
+        echo "❌ $component verification failed: $error_message"
+        return 1
+    fi
+}
+
+# Create ECR repository
 echo "Creating ECR repository..."
 aws ecr create-repository \
     --repository-name dev-application \
@@ -19,11 +35,16 @@ ECR_REPO_URI=$(aws ecr describe-repositories \
     --query 'repositories[0].repositoryUri' \
     --output text)
 
+verify_component "ECR Repository" \
+    "aws ecr describe-repositories --repository-names dev-application" \
+    "ECR repository creation failed"
+
 ecr_time=$(date +%s)
 echo "ECR repository setup completed in $((ecr_time - start_time)) seconds"
 echo "ECR Repository URI: $ECR_REPO_URI"
 echo "-----------------------------------"
 
+# Create networking stack
 echo "Creating EKS networking stack..."
 aws cloudformation create-stack \
   --stack-name eks-subnets \
@@ -35,7 +56,11 @@ aws cloudformation create-stack \
 echo "Waiting for networking stack to complete..."
 aws cloudformation wait stack-create-complete --stack-name eks-subnets
 
-# Get subnet IDs from the networking stack outputs
+verify_component "Networking Stack" \
+    "aws cloudformation describe-stacks --stack-name eks-subnets --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
+    "Networking stack creation failed"
+
+# Get subnet IDs
 PRIVATE_SUBNET_1=$(aws cloudformation describe-stacks \
   --stack-name eks-subnets \
   --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnet1Id`].OutputValue' \
@@ -50,6 +75,7 @@ networking_time=$(date +%s)
 echo "Networking stack completed in $((networking_time - ecr_time)) seconds"
 echo "-----------------------------------"
 
+# Create EKS cluster
 echo "Creating EKS cluster stack..."
 aws cloudformation create-stack \
   --stack-name eks-cluster \
@@ -64,22 +90,184 @@ aws cloudformation create-stack \
 echo "Waiting for EKS cluster stack to complete..."
 aws cloudformation wait stack-create-complete --stack-name eks-cluster
 
+verify_component "EKS Cluster Stack" \
+    "aws cloudformation describe-stacks --stack-name eks-cluster --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
+    "EKS cluster stack creation failed"
+
 eks_time=$(date +%s)
 echo "EKS cluster stack completed in $((eks_time - networking_time)) seconds"
 echo "-----------------------------------"
 
+# Update kubeconfig
 echo "Updating kubeconfig..."
 aws eks --region us-east-1 update-kubeconfig --name dev-eks-cluster
 
-echo "Verifying cluster access..."
-kubectl get nodes
+# Setup OIDC provider
+echo "Setting up OIDC provider..."
+eksctl utils associate-iam-oidc-provider \
+    --cluster dev-eks-cluster \
+    --approve \
+    --region us-east-1
+
+verify_component "OIDC Provider" \
+    "OIDC_ID=\$(aws eks describe-cluster --name dev-eks-cluster --query 'cluster.identity.oidc.issuer' --output text | cut -d '/' -f 5) && aws iam list-open-id-connect-providers | grep -q \$OIDC_ID" \
+    "OIDC provider setup failed"
+
+# Create EBS CSI Driver policy
+echo "Creating EBS CSI Driver policy..."
+aws iam create-policy \
+    --policy-name AWSEBSCSIDriverPolicy \
+    --policy-document '{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:CreateSnapshot",
+            "ec2:AttachVolume",
+            "ec2:DetachVolume",
+            "ec2:ModifyVolume",
+            "ec2:DescribeAvailabilityZones",
+            "ec2:DescribeInstances",
+            "ec2:DescribeSnapshots",
+            "ec2:DescribeTags",
+            "ec2:DescribeVolumes",
+            "ec2:DescribeVolumesModifications"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:CreateTags"
+          ],
+          "Resource": [
+            "arn:aws:ec2:*:*:volume/*",
+            "arn:aws:ec2:*:*:snapshot/*"
+          ],
+          "Condition": {
+            "StringEquals": {
+              "ec2:CreateAction": [
+                "CreateVolume",
+                "CreateSnapshot"
+              ]
+            }
+          }
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DeleteTags"
+          ],
+          "Resource": [
+            "arn:aws:ec2:*:*:volume/*",
+            "arn:aws:ec2:*:*:snapshot/*"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:CreateVolume"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringLike": {
+              "aws:RequestTag/ebs.csi.aws.com/cluster": "true"
+            }
+          }
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DeleteVolume"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringLike": {
+              "ec2:ResourceTag/ebs.csi.aws.com/cluster": "true"
+            }
+          }
+        }
+      ]
+    }' || true
+
+verify_component "EBS CSI Driver Policy" \
+    "aws iam get-policy --policy-arn arn:aws:iam::\$(aws sts get-caller-identity --query Account --output text):policy/AWSEBSCSIDriverPolicy" \
+    "EBS CSI Driver policy creation failed"
+
+# Create service account for EBS CSI Driver
+echo "Creating service account for EBS CSI Driver..."
+eksctl create iamserviceaccount \
+    --name ebs-csi-controller-sa \
+    --namespace kube-system \
+    --cluster dev-eks-cluster \
+    --attach-policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/AWSEBSCSIDriverPolicy \
+    --approve \
+    --region us-east-1
+
+verify_component "Service Account" \
+    "kubectl get serviceaccount ebs-csi-controller-sa -n kube-system" \
+    "Service account creation failed"
+
+# Setup storage class for EBS volumes
+echo "Creating storage class for EBS volumes..."
+kubectl delete sc gp2 --ignore-not-found
+kubectl apply -f - <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+  name: gp2
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp2
+  encrypted: "true"
+volumeBindingMode: WaitForFirstConsumer
+EOF
+
+verify_component "Storage Class" \
+    "kubectl get sc gp2 -o jsonpath='{.provisioner}' | grep -q 'ebs.csi.aws.com'" \
+    "Storage class creation failed or has incorrect provisioner"
+
+# Test PVC creation
+echo "Testing PVC creation..."
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp2
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+
+# Wait for PVC to be created
+echo "Waiting for PVC to be created..."
+sleep 10
+verify_component "PVC Creation" \
+    "kubectl get pvc test-pvc" \
+    "PVC creation failed"
+
+# Clean up test PVC
+kubectl delete pvc test-pvc --ignore-not-found
+
+# Verify cluster access and node status
+echo "Verifying cluster access and node status..."
+verify_component "Cluster Nodes" \
+    "kubectl get nodes | grep -q 'Ready'" \
+    "No ready nodes found in the cluster"
 
 end_time=$(date +%s)
 echo "-----------------------------------"
 echo "Setup completed at $(date)"
 echo "Total setup time: $((end_time - start_time)) seconds"
 echo "Breakdown:"
-echo "  ECR repository: $((ecr_time - eks_time)) seconds"
-echo "  Networking stack: $((networking_time - start_time)) seconds"
+echo "  ECR repository: $((ecr_time - start_time)) seconds"
+echo "  Networking stack: $((networking_time - ecr_time)) seconds"
 echo "  EKS cluster stack: $((eks_time - networking_time)) seconds"
 echo "  Final configuration: $((end_time - eks_time)) seconds"
