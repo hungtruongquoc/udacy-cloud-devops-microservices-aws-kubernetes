@@ -44,6 +44,29 @@ echo "ECR repository setup completed in $((ecr_time - start_time)) seconds"
 echo "ECR Repository URI: $ECR_REPO_URI"
 echo "-----------------------------------"
 
+# After ECR setup and before EKS cluster creation
+echo "Creating CodeBuild stack..."
+aws cloudformation create-stack \
+  --stack-name codebuild-stack \
+  --template-body file://deployment/cloudformation/resources/codebuild.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameters \
+    ParameterKey=Environment,ParameterValue=dev \
+    ParameterKey=GitHubRepo,ParameterValue=https://github.com/YOUR_USERNAME/YOUR_REPO.git \
+    ParameterKey=GitHubBranch,ParameterValue=main \
+    ParameterKey=ECRRepositoryURI,ParameterValue=$ECR_REPO_URI
+
+echo "Waiting for CodeBuild stack to complete..."
+aws cloudformation wait stack-create-complete --stack-name codebuild-stack
+
+verify_component "CodeBuild Stack" \
+    "aws cloudformation describe-stacks --stack-name codebuild-stack --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
+    "CodeBuild stack creation failed"
+
+codebuild_time=$(date +%s)
+echo "CodeBuild setup completed in $((codebuild_time - ecr_time)) seconds"
+echo "-----------------------------------"
+
 # Create networking stack
 echo "Creating EKS networking stack..."
 aws cloudformation create-stack \
@@ -114,86 +137,27 @@ verify_component "OIDC Provider" \
     "OIDC provider setup failed"
 
 # Create EBS CSI Driver policy
+# Create EBS CSI Driver policy using CloudFormation
 echo "Creating EBS CSI Driver policy..."
-aws iam create-policy \
-    --policy-name AWSEBSCSIDriverPolicy \
-    --policy-document '{
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ec2:CreateSnapshot",
-            "ec2:AttachVolume",
-            "ec2:DetachVolume",
-            "ec2:ModifyVolume",
-            "ec2:DescribeAvailabilityZones",
-            "ec2:DescribeInstances",
-            "ec2:DescribeSnapshots",
-            "ec2:DescribeTags",
-            "ec2:DescribeVolumes",
-            "ec2:DescribeVolumesModifications"
-          ],
-          "Resource": "*"
-        },
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ec2:CreateTags"
-          ],
-          "Resource": [
-            "arn:aws:ec2:*:*:volume/*",
-            "arn:aws:ec2:*:*:snapshot/*"
-          ],
-          "Condition": {
-            "StringEquals": {
-              "ec2:CreateAction": [
-                "CreateVolume",
-                "CreateSnapshot"
-              ]
-            }
-          }
-        },
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ec2:DeleteTags"
-          ],
-          "Resource": [
-            "arn:aws:ec2:*:*:volume/*",
-            "arn:aws:ec2:*:*:snapshot/*"
-          ]
-        },
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ec2:CreateVolume"
-          ],
-          "Resource": "*",
-          "Condition": {
-            "StringLike": {
-              "aws:RequestTag/ebs.csi.aws.com/cluster": "true"
-            }
-          }
-        },
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ec2:DeleteVolume"
-          ],
-          "Resource": "*",
-          "Condition": {
-            "StringLike": {
-              "ec2:ResourceTag/ebs.csi.aws.com/cluster": "true"
-            }
-          }
-        }
-      ]
-    }' || true
+aws cloudformation create-stack \
+  --stack-name iam-policies \
+  --template-body deployment/cloudformation/resources/iam-policy-ebs-csi-driver.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameters \
+    ParameterKey=Environment,ParameterValue=dev
+
+echo "Waiting for IAM policies stack to complete..."
+aws cloudformation wait stack-create-complete --stack-name iam-policies
 
 verify_component "EBS CSI Driver Policy" \
-    "aws iam get-policy --policy-arn arn:aws:iam::\$(aws sts get-caller-identity --query Account --output text):policy/AWSEBSCSIDriverPolicy" \
+    "aws cloudformation describe-stacks --stack-name iam-policies --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
     "EBS CSI Driver policy creation failed"
+
+# Get the policy ARN for service account creation
+EBS_POLICY_ARN=$(aws cloudformation describe-stacks \
+  --stack-name iam-policies \
+  --query 'Stacks[0].Outputs[?OutputKey==`EBSCSIDriverPolicyArn`].OutputValue' \
+  --output text)
 
 # Create service account for EBS CSI Driver
 echo "Creating service account for EBS CSI Driver..."

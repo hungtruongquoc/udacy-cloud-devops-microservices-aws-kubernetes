@@ -482,6 +482,23 @@ Delete the PVC with:
 kubectl delete pvc data-postgresql-0
 ```
 
+# CodeBuild Provision
+
+Make sure the script can be executed:
+```bash
+chmod +x codebuild-requirement-setup.sh
+```
+
+Run the script `./codebuild-requirement-setup.sh` to provision necessary components for CodeBuild
+
+Provide your GitHub Personal Access Token with following command
+
+```bash
+aws secretsmanager put-secret-value \
+  --secret-id GitHubAccessToken \
+  --secret-string "YOUR_PERSONAL_ACCESS_TOKEN"
+```
+
 # Exploration
 ## VPC Information
 

@@ -30,6 +30,51 @@ verify_deletion() {
     return 0
 }
 
+cleanup_ebs_csi_policy() {
+    local ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    local POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/AWSEBSCSIDriverPolicy"
+
+    echo "Starting EBS CSI policy cleanup..."
+
+    # Wait for any potential service account deletions to complete
+    echo "Waiting for service account stack deletion..."
+    aws cloudformation wait stack-delete-complete \
+        --stack-name eksctl-dev-eks-cluster-addon-iamserviceaccount-kube-system-ebs-csi-controller-sa || true
+
+    # List all policy versions and delete non-default versions
+    echo "Cleaning up policy versions..."
+    local VERSIONS=$(aws iam list-policy-versions \
+        --policy-arn $POLICY_ARN \
+        --query 'Versions[?!IsDefaultVersion].VersionId' \
+        --output text)
+
+    for version in $VERSIONS; do
+        echo "Deleting policy version: $version"
+        aws iam delete-policy-version \
+            --policy-arn $POLICY_ARN \
+            --version-id $version || true
+    done
+
+    # Force deletion with retries
+    echo "Attempting to delete policy..."
+    local max_attempts=5
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if aws iam delete-policy --policy-arn $POLICY_ARN 2>/dev/null; then
+            echo "✅ Successfully deleted EBS CSI Driver policy"
+            return 0
+        else
+            echo "Attempt $attempt of $max_attempts failed. Waiting before retry..."
+            sleep 10
+            ((attempt++))
+        fi
+    done
+
+    echo "❌ Failed to delete EBS CSI Driver policy after $max_attempts attempts"
+    return 1
+}
+
 echo "Checking if cluster is active..."
 if kubectl cluster-info &>/dev/null; then
     echo "Cluster is active. Proceeding with Kubernetes resource deletion..."
@@ -71,12 +116,8 @@ verify_deletion "IAM service account" \
     "kubectl get serviceaccount -n kube-system ebs-csi-controller-sa"
 
 # Delete EBS CSI Driver policy
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-echo "Deleting EBS CSI Driver policy..."
-aws iam delete-policy --policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/AWSEBSCSIDriverPolicy || true
-
-verify_deletion "EBS CSI Driver policy" \
-    "aws iam get-policy --policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/AWSEBSCSIDriverPolicy"
+echo "Cleaning up EBS CSI Driver policy..."
+cleanup_ebs_csi_policy
 
 # Delete OIDC provider
 echo "Cleaning up OIDC provider..."
