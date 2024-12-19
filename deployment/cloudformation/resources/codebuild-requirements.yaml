@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  # S3 Bucket for Build Artifacts
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 2024-udacity-devops-htruong-artifacts-bucket
+
+  # IAM Role for CodeBuild
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+
+  # Secrets Manager for GitHub Token
+  GitHubAccessTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: GitHubAccessToken
+      Description: GitHub token for CodeBuild
+      SecretString: "PLACEHOLDER" # Replace later via CLI or script
+
+  # Bucket Policy to Restrict Access
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt CodeBuildRole.Arn
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub "${ArtifactsBucket.Arn}/*"
+          - Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub "${ArtifactsBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn: !GetAtt CodeBuildRole.Arn
+
+Outputs:
+  ArtifactsBucket:
+    Description: The S3 bucket for storing CodeBuild artifacts
+    Value: !Ref ArtifactsBucket
+  CodeBuildRoleArn:
+    Description: The ARN of the IAM Role for CodeBuild
+    Value: !GetAtt CodeBuildRole.Arn
+  GitHubAccessTokenSecretName:
+    Description: The name of the GitHub access token secret
+    Value: !Ref GitHubAccessTokenSecret
