@@ -44,7 +44,7 @@ echo "ECR repository setup completed in $((ecr_time - start_time)) seconds"
 echo "ECR Repository URI: $ECR_REPO_URI"
 echo "-----------------------------------"
 
-# After ECR setup and before EKS cluster creation
+# Create CodeBuild stack
 echo "Creating CodeBuild stack..."
 aws cloudformation create-stack \
   --stack-name codebuild-stack \
@@ -59,11 +59,8 @@ aws cloudformation create-stack \
     ParameterKey=CodeBuildRoleArn,ParameterValue=codebuild-requirements-stack-CodeBuildRole-wOF9xKYaqUU1 \
     ParameterKey=GitHubAccessTokenSecretName,ParameterValue=GitHubAccessToken
 
-echo "Waiting for CodeBuild stack to complete..."
-aws cloudformation wait stack-create-complete --stack-name codebuild-stack
-
 verify_component "CodeBuild Stack" \
-    "aws cloudformation describe-stacks --stack-name codebuild-stack --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
+    "aws cloudformation wait stack-create-complete --stack-name codebuild-stack" \
     "CodeBuild stack creation failed"
 
 codebuild_time=$(date +%s)
@@ -79,11 +76,8 @@ aws cloudformation create-stack \
     ParameterKey=Environment,ParameterValue=dev \
     ParameterKey=VpcId,ParameterValue=vpc-7aa76207
 
-echo "Waiting for networking stack to complete..."
-aws cloudformation wait stack-create-complete --stack-name eks-subnets
-
 verify_component "Networking Stack" \
-    "aws cloudformation describe-stacks --stack-name eks-subnets --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
+    "aws cloudformation wait stack-create-complete --stack-name eks-subnets" \
     "Networking stack creation failed"
 
 # Get subnet IDs
@@ -98,7 +92,7 @@ PRIVATE_SUBNET_2=$(aws cloudformation describe-stacks \
   --output text)
 
 networking_time=$(date +%s)
-echo "Networking stack completed in $((networking_time - ecr_time)) seconds"
+echo "Networking stack completed in $((networking_time - codebuild_time)) seconds"
 echo "-----------------------------------"
 
 # Create EKS cluster
@@ -113,11 +107,8 @@ aws cloudformation create-stack \
     ParameterKey=PrivateSubnet1,ParameterValue=$PRIVATE_SUBNET_1 \
     ParameterKey=PrivateSubnet2,ParameterValue=$PRIVATE_SUBNET_2
 
-echo "Waiting for EKS cluster stack to complete..."
-aws cloudformation wait stack-create-complete --stack-name eks-cluster
-
 verify_component "EKS Cluster Stack" \
-    "aws cloudformation describe-stacks --stack-name eks-cluster --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
+    "aws cloudformation wait stack-create-complete --stack-name eks-cluster" \
     "EKS cluster stack creation failed"
 
 eks_time=$(date +%s)
@@ -126,7 +117,7 @@ echo "-----------------------------------"
 
 # Update kubeconfig
 echo "Updating kubeconfig..."
-aws eks --region us-east-1 update-kubeconfig --name dev-eks-cluster
+aws eks update-kubeconfig --name dev-eks-cluster --region us-east-1
 
 # Setup OIDC provider
 echo "Setting up OIDC provider..."
@@ -135,98 +126,95 @@ eksctl utils associate-iam-oidc-provider \
     --approve \
     --region us-east-1
 
-verify_component "OIDC Provider" \
-    'OIDC_ID=$(aws eks describe-cluster --name dev-eks-cluster --query "cluster.identity.oidc.issuer" --output text | cut -d "/" -f 5) && aws iam list-open-id-connect-providers | grep -q $OIDC_ID' \
-    "OIDC provider setup failed"
+oidc_time=$(date +%s)
+echo "OIDC provider setup completed in $((oidc_time - eks_time)) seconds"
+echo "-----------------------------------"
 
-# Create EBS CSI Driver policy
-# Create EBS CSI Driver policy using CloudFormation
-echo "Creating EBS CSI Driver policy..."
-aws cloudformation create-stack \
-  --stack-name iam-policies \
-  --template-body deployment/cloudformation/resources/iam-policy-ebs-csi-driver.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameters \
-    ParameterKey=Environment,ParameterValue=dev
+# Install EBS CSI Driver using EKS add-on
+echo "Installing EBS CSI Driver add-on..."
 
-echo "Waiting for IAM policies stack to complete..."
-aws cloudformation wait stack-create-complete --stack-name iam-policies
+# Delete existing addon if it exists
+echo "Checking for existing EBS CSI Driver addon..."
+if aws eks describe-addon --cluster-name dev-eks-cluster --addon-name aws-ebs-csi-driver --region us-east-1 2>/dev/null; then
+    echo "Deleting existing add-on..."
+    aws eks delete-addon \
+        --cluster-name dev-eks-cluster \
+        --addon-name aws-ebs-csi-driver \
+        --region us-east-1
 
-verify_component "EBS CSI Driver Policy" \
-    "aws cloudformation describe-stacks --stack-name iam-policies --query 'Stacks[0].StackStatus' --output text | grep -q 'COMPLETE'" \
-    "EBS CSI Driver policy creation failed"
+    echo "Waiting for add-on deletion to complete..."
+    aws eks wait addon-deleted \
+        --cluster-name dev-eks-cluster \
+        --addon-name aws-ebs-csi-driver \
+        --region us-east-1 || true
+fi
 
-# Get the policy ARN for service account creation
-EBS_POLICY_ARN=$(aws cloudformation describe-stacks \
-  --stack-name iam-policies \
-  --query 'Stacks[0].Outputs[?OutputKey==`EBSCSIDriverPolicyArn`].OutputValue' \
-  --output text)
+# Clean up existing service accounts
+echo "Cleaning up existing service accounts..."
+kubectl delete serviceaccount -n kube-system ebs-csi-controller-sa --force --grace-period=0 || true
 
-# Create service account for EBS CSI Driver
-echo "Creating service account for EBS CSI Driver..."
+# Delete the CloudFormation stack manually
+echo "Cleaning up CloudFormation stack..."
+aws cloudformation delete-stack \
+    --stack-name eksctl-dev-eks-cluster-addon-iamserviceaccount-kube-system-ebs-csi-controller-sa || true
+
+echo "Waiting for CloudFormation stack deletion..."
+aws cloudformation wait stack-delete-complete \
+    --stack-name eksctl-dev-eks-cluster-addon-iamserviceaccount-kube-system-ebs-csi-controller-sa || true
+
+# Wait for cleanup
+echo "Waiting for resources to clean up..."
+sleep 30
+
+# Create new service account
+echo "Creating new service account..."
 eksctl create iamserviceaccount \
+    --cluster dev-eks-cluster \
     --name ebs-csi-controller-sa \
     --namespace kube-system \
-    --cluster dev-eks-cluster \
-    --attach-policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/AWSEBSCSIDriverPolicy \
-    --approve \
+    --attach-policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
+    --region us-east-1 \
+    --override-existing-serviceaccounts \
+    --approve
+
+# Wait for service account creation
+echo "Waiting for service account creation..."
+sleep 30
+
+# Get the role ARN
+EBS_CSI_ROLE_ARN=$(kubectl get serviceaccount ebs-csi-controller-sa -n kube-system \
+    -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}')
+
+if [ -z "$EBS_CSI_ROLE_ARN" ]; then
+    echo "Failed to get role ARN"
+    exit 1
+fi
+
+echo "Retrieved Role ARN: $EBS_CSI_ROLE_ARN"
+
+# Install EBS CSI Driver add-on
+echo "Installing EBS CSI Driver..."
+aws eks create-addon \
+    --cluster-name dev-eks-cluster \
+    --addon-name aws-ebs-csi-driver \
+    --addon-version v1.37.0-eksbuild.1 \
+    --service-account-role-arn "$EBS_CSI_ROLE_ARN" \
+    --resolve-conflicts OVERWRITE \
     --region us-east-1
 
-verify_component "Service Account" \
-    "kubectl get serviceaccount ebs-csi-controller-sa -n kube-system" \
-    "Service account creation failed"
+# Wait for add-on to be active
+verify_component "EBS CSI Driver Add-on" \
+    "aws eks wait addon-active --cluster-name dev-eks-cluster --addon-name aws-ebs-csi-driver --region us-east-1" \
+    "EBS CSI Driver add-on installation failed"
 
-# Setup storage class for EBS volumes
-echo "Creating storage class for EBS volumes..."
-kubectl delete sc gp2 --ignore-not-found
-kubectl apply -f - <<EOF
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "true"
-  name: gp2
-provisioner: ebs.csi.aws.com
-parameters:
-  type: gp2
-  encrypted: "true"
-volumeBindingMode: WaitForFirstConsumer
-EOF
-
-verify_component "Storage Class" \
-    "kubectl get sc gp2 -o jsonpath='{.provisioner}' | grep -q 'ebs.csi.aws.com'" \
-    "Storage class creation failed or has incorrect provisioner"
-
-# Test PVC creation
-echo "Testing PVC creation..."
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: test-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: gp2
-  resources:
-    requests:
-      storage: 1Gi
-EOF
-
-# Wait for PVC to be created
-echo "Waiting for PVC to be created..."
-sleep 10
-verify_component "PVC Creation" \
-    "kubectl get pvc test-pvc" \
-    "PVC creation failed"
-
-# Clean up test PVC
-kubectl delete pvc test-pvc --ignore-not-found
+ebs_csi_time=$(date +%s)
+echo "EBS CSI Driver setup completed in $((ebs_csi_time - oidc_time)) seconds"
+echo "-----------------------------------"
 
 # Verify cluster access and node status
 echo "Verifying cluster access and node status..."
 verify_component "Cluster Nodes" \
-    "kubectl get nodes | grep -q 'Ready'" \
+    "kubectl wait --for=condition=Ready nodes --all --timeout=300s" \
     "No ready nodes found in the cluster"
 
 end_time=$(date +%s)
@@ -235,6 +223,9 @@ echo "Setup completed at $(date)"
 echo "Total setup time: $((end_time - start_time)) seconds"
 echo "Breakdown:"
 echo "  ECR repository: $((ecr_time - start_time)) seconds"
-echo "  Networking stack: $((networking_time - ecr_time)) seconds"
+echo "  CodeBuild stack: $((codebuild_time - ecr_time)) seconds"
+echo "  Networking stack: $((networking_time - codebuild_time)) seconds"
 echo "  EKS cluster stack: $((eks_time - networking_time)) seconds"
-echo "  Final configuration: $((end_time - eks_time)) seconds"
+echo "  OIDC provider: $((oidc_time - eks_time)) seconds"
+echo "  EBS CSI Driver: $((ebs_csi_time - oidc_time)) seconds"
+echo "  Final configuration: $((end_time - ebs_csi_time)) seconds"

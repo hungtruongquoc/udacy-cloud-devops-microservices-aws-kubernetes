@@ -48,6 +48,13 @@ echo "Enabling automount of service account tokens..."
 kubectl patch serviceaccount $SA_NAME -n kube-system \
     -p '{"automountServiceAccountToken": true}'
 
+# Add before EBS CSI driver installation
+echo "Cleaning up existing EBS CSI Driver..."
+helm uninstall aws-ebs-csi-driver -n kube-system || true
+kubectl delete pdb -n kube-system ebs-csi-controller || true
+kubectl delete deployment -n kube-system ebs-csi-controller || true
+sleep 30  # Wait for cleanup
+
 # Verify and install EBS CSI Driver
 echo "Verifying EBS CSI Driver..."
 if ! helm list -n kube-system | grep -q "aws-ebs-csi-driver"; then
@@ -72,15 +79,17 @@ echo "Verifying gp2 storage class..."
 if ! kubectl get sc gp2 &>/dev/null; then
     echo "Creating gp2 storage class..."
     kubectl apply -f - <<EOF
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: gp2
-provisioner: ebs.csi.aws.com
-parameters:
-  type: gp2
-  encrypted: "true"
-volumeBindingMode: WaitForFirstConsumer
+    apiVersion: storage.k8s.io/v1
+    kind: StorageClass
+    metadata:
+      name: gp2
+      annotations:
+        storageclass.kubernetes.io/is-default-class: "true"
+    provisioner: ebs.csi.aws.com
+    parameters:
+      type: gp2
+      fsType: ext4
+    volumeBindingMode: WaitForFirstConsumer
 EOF
 fi
 
@@ -92,7 +101,12 @@ echo "-----------------------------------"
 echo "Cleaning up any existing PostgreSQL installation..."
 helm uninstall postgresql || true
 kubectl delete pvc data-postgresql-0 --force --grace-period=0 || true
-sleep 10  # Wait for cleanup
+
+echo "Waiting for PVC cleanup..."
+while kubectl get pvc data-postgresql-0 2>/dev/null; do
+    echo "Waiting for PVC to be deleted..."
+    sleep 5
+done
 
 # Get the AZ of the first node
 NODE_AZ=$(kubectl get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernetes\.io/zone}')
@@ -138,6 +152,20 @@ helm install postgresql bitnami/postgresql \
   --set primary.persistence.mountPath=/bitnami/postgresql \
   --timeout 600s \
   --wait
+
+echo "Verifying PVC creation..."
+for i in {1..12}; do
+    if kubectl get pvc data-postgresql-0 | grep -q Bound; then
+        echo "PVC successfully bound"
+        break
+    fi
+    if [ $i -eq 12 ]; then
+        echo "Timeout waiting for PVC to bind"
+        exit 1
+    fi
+    echo "Waiting for PVC to bind... Attempt $i/12"
+    sleep 10
+done
 
 # Enhanced error checking
 if [ $? -ne 0 ]; then

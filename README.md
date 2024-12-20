@@ -499,6 +499,90 @@ aws secretsmanager put-secret-value \
   --secret-string "YOUR_PERSONAL_ACCESS_TOKEN"
 ```
 
+# EBS CSI Driver Setup Script Guide
+
+## Purpose
+This script automates the installation and configuration of the AWS EBS CSI (Container Storage Interface) Driver on an existing EKS cluster. The EBS CSI Driver enables Kubernetes pods to use Amazon EBS volumes for persistent storage.
+
+## Prerequisites
+- AWS CLI configured with appropriate permissions
+- `kubectl` installed and configured
+- `eksctl` installed
+- An existing EKS cluster named "dev-eks-cluster"
+- IAM permissions to:
+   - Manage EKS addons
+   - Create/delete IAM roles and policies
+   - Manage CloudFormation stacks
+
+## How to Run
+1. Save the script as `setup-ebs-csi.sh`
+2. Make it executable:
+   ```bash
+   chmod +x setup-ebs-csi.sh
+   ```
+3. Run with logging:
+   ```bash
+   ./setup-ebs-csi.sh 2>&1 | tee ebs-csi-setup-$(date +%Y%m%d-%H%M%S).log
+   ```
+
+## Script Functionality Breakdown
+
+1. **Initial Setup** (0-1 minutes)
+   - Configures error handling with `set -e`
+   - Updates kubeconfig to connect to the EKS cluster
+
+2. **Cleanup Phase** (1-2 minutes)
+   - Removes any existing EBS CSI Driver addon
+   - Deletes old service accounts
+   - Cleans up related CloudFormation stacks
+
+3. **IAM Setup Phase** (2-3 minutes)
+   - Creates a new service account
+   - Associates it with the EBS CSI Driver IAM policy
+   - Verifies service account creation
+
+4. **Driver Installation** (2-3 minutes)
+   - Installs the EBS CSI Driver as an EKS addon
+   - Configures with the correct IAM role
+   - Waits for activation
+
+5. **Verification Phase** (1 minute)
+   - Verifies addon status
+   - Checks for running pods
+   - Displays completion summary
+
+## Expected Outputs
+- Service account details
+- EBS CSI Driver addon status
+- Running pods confirmation (should see controller and node pods)
+- Total execution time
+
+## Success Criteria
+The script is successful when:
+1. No errors are reported
+2. EBS CSI Driver addon shows as "ACTIVE"
+3. All pods are in "Running" state
+4. You see both controller (2 pods) and node pods running
+
+## Troubleshooting
+If the script fails:
+1. Check the logs for specific error messages
+2. Verify AWS CLI credentials
+3. Ensure your EKS cluster exists and is accessible
+4. Verify IAM permissions
+
+## Common Issues
+1. IAM permission errors
+2. Existing resources blocking creation
+3. Network connectivity issues
+4. Cluster access problems
+
+## Next Steps
+After successful installation:
+1. Verify storage class availability
+2. Test with a sample PVC
+3. Proceed with deploying stateful applications
+
 # Exploration
 ## VPC Information
 

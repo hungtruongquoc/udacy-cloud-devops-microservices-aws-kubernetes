@@ -3,6 +3,8 @@
 # Parameterize stack names
 CLUSTER_STACK="eks-cluster"
 NETWORK_STACK="eks-subnets"
+CODEBUILD_STACK="codebuild-stack"
+IAM_POLICIES_STACK="iam-policies-ebs-csi-driver"
 
 # Start timing
 start_time=$(date +%s)
@@ -104,6 +106,22 @@ else
     echo "Cluster is not accessible or doesn't exist. Proceeding with infrastructure cleanup..."
 fi
 
+# Delete CodeBuild stack
+echo "Deleting CodeBuild stack..."
+aws cloudformation delete-stack --stack-name $CODEBUILD_STACK
+
+echo "Waiting for CodeBuild stack deletion..."
+if ! aws cloudformation wait stack-delete-complete --stack-name $CODEBUILD_STACK; then
+    echo "❌ Failed to delete CodeBuild stack"
+    exit 1
+fi
+verify_deletion "CodeBuild stack" \
+    "aws cloudformation describe-stacks --stack-name $CODEBUILD_STACK"
+
+codebuild_delete_time=$(date +%s)
+echo "CodeBuild stack deletion completed in $((codebuild_delete_time - start_time)) seconds"
+echo "-----------------------------------"
+
 # Delete IAM service accounts and policies
 echo "Cleaning up IAM resources..."
 eksctl delete iamserviceaccount \
@@ -115,21 +133,71 @@ eksctl delete iamserviceaccount \
 verify_deletion "IAM service account" \
     "kubectl get serviceaccount -n kube-system ebs-csi-controller-sa"
 
-# Delete EBS CSI Driver policy
-echo "Cleaning up EBS CSI Driver policy..."
-cleanup_ebs_csi_policy
+# Delete IAM policies stack
+echo "Deleting IAM policies stack..."
+aws cloudformation delete-stack --stack-name $IAM_POLICIES_STACK
+
+echo "Waiting for IAM policies stack deletion..."
+if ! aws cloudformation wait stack-delete-complete --stack-name $IAM_POLICIES_STACK; then
+    echo "❌ Failed to delete IAM policies stack"
+    exit 1
+fi
+verify_deletion "IAM policies stack" \
+    "aws cloudformation describe-stacks --stack-name $IAM_POLICIES_STACK"
+
+iam_delete_time=$(date +%s)
+echo "IAM resources cleanup completed in $((iam_delete_time - codebuild_delete_time)) seconds"
+echo "-----------------------------------"
 
 # Delete OIDC provider
 echo "Cleaning up OIDC provider..."
-OIDC_PROVIDER=$(aws eks describe-cluster --name dev-eks-cluster --query "cluster.identity.oidc.issuer" --output text | sed 's/https:\/\///' || echo "")
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Get OIDC provider URL from cluster
+OIDC_PROVIDER=$(aws eks describe-cluster \
+    --name dev-eks-cluster \
+    --query "cluster.identity.oidc.issuer" \
+    --output text 2>/dev/null | sed 's|https://||')
+
 if [ ! -z "$OIDC_PROVIDER" ]; then
-    aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/$OIDC_PROVIDER" || true
-    verify_deletion "OIDC provider" \
-        "aws iam list-open-id-connect-providers | grep $OIDC_PROVIDER"
+    echo "Found OIDC provider: $OIDC_PROVIDER"
+    OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_PROVIDER}"
+
+    # Check if the OIDC provider exists
+    if aws iam list-open-id-connect-providers | grep -q "$OIDC_ARN"; then
+        echo "Deleting OIDC provider: $OIDC_ARN"
+        aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN"
+
+        # Verify deletion without using the verify_deletion function
+        echo "Verifying OIDC provider deletion..."
+        timeout=300  # 5 minutes timeout
+        start_time=$(date +%s)
+
+        while aws iam list-open-id-connect-providers | grep -q "$OIDC_ARN"; do
+            current_time=$(date +%s)
+            elapsed=$((current_time - start_time))
+
+            if [ $elapsed -gt $timeout ]; then
+                echo "❌ Timeout waiting for OIDC provider deletion"
+                break
+            fi
+
+            echo "Waiting for OIDC provider deletion... (${elapsed}s elapsed)"
+            sleep 10
+        done
+
+        if ! aws iam list-open-id-connect-providers | grep -q "$OIDC_ARN"; then
+            echo "✅ OIDC provider deleted successfully"
+        fi
+    else
+        echo "OIDC provider not found or already deleted"
+    fi
+else
+    echo "No OIDC provider found for cluster"
 fi
 
 k8s_cleanup_time=$(date +%s)
-echo "Kubernetes cleanup completed in $((k8s_cleanup_time - start_time)) seconds"
+echo "Kubernetes cleanup completed in $((k8s_cleanup_time - iam_delete_time)) seconds"
 echo "-----------------------------------"
 
 echo "Deleting EKS cluster stack..."
@@ -206,7 +274,9 @@ echo "-----------------------------------"
 echo "Teardown completed at $(date)"
 echo "Total teardown time: $((end_time - start_time)) seconds"
 echo "Breakdown:"
-echo "  Kubernetes cleanup: $((k8s_cleanup_time - start_time)) seconds"
+echo "  CodeBuild stack deletion: $((codebuild_delete_time - start_time)) seconds"
+echo "  IAM resources cleanup: $((iam_delete_time - codebuild_delete_time)) seconds"
+echo "  Kubernetes cleanup: $((k8s_cleanup_time - iam_delete_time)) seconds"
 echo "  EKS cluster deletion: $((eks_delete_time - k8s_cleanup_time)) seconds"
 echo "  Networking deletion: $((network_delete_time - eks_delete_time)) seconds"
 echo "  ECR cleanup: $((ecr_delete_time - network_delete_time)) seconds"
