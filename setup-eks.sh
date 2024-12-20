@@ -52,9 +52,12 @@ aws cloudformation create-stack \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters \
     ParameterKey=Environment,ParameterValue=dev \
-    ParameterKey=GitHubRepo,ParameterValue=https://github.com/YOUR_USERNAME/YOUR_REPO.git \
+    ParameterKey=GitHubRepo,ParameterValue=https://github.com/hungtruongquoc/udacy-cloud-devops-microservices-aws-kubernetes.git \
     ParameterKey=GitHubBranch,ParameterValue=main \
-    ParameterKey=ECRRepositoryURI,ParameterValue=$ECR_REPO_URI
+    ParameterKey=ECRRepositoryURI,ParameterValue=$ECR_REPO_URI \
+    ParameterKey=ArtifactsBucket,ParameterValue=2024-udacity-devops-htruong-artifacts-bucket \
+    ParameterKey=CodeBuildRoleArn,ParameterValue=codebuild-requirements-stack-CodeBuildRole-wOF9xKYaqUU1 \
+    ParameterKey=GitHubAccessTokenSecretName,ParameterValue=GitHubAccessToken
 
 echo "Waiting for CodeBuild stack to complete..."
 aws cloudformation wait stack-create-complete --stack-name codebuild-stack
@@ -133,7 +136,7 @@ eksctl utils associate-iam-oidc-provider \
     --region us-east-1
 
 verify_component "OIDC Provider" \
-    "OIDC_ID=\$(aws eks describe-cluster --name dev-eks-cluster --query 'cluster.identity.oidc.issuer' --output text | cut -d '/' -f 5) && aws iam list-open-id-connect-providers | grep -q \$OIDC_ID" \
+    'OIDC_ID=$(aws eks describe-cluster --name dev-eks-cluster --query "cluster.identity.oidc.issuer" --output text | cut -d "/" -f 5) && aws iam list-open-id-connect-providers | grep -q $OIDC_ID' \
     "OIDC provider setup failed"
 
 # Create EBS CSI Driver policy

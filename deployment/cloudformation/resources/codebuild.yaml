@@ -18,6 +18,9 @@ Parameters:
   ECRRepositoryURI:
     Type: String
     Description: The URI of the ECR repository
+  GitHubAccessTokenSecretName:
+    Type: String
+    Description: The name of the secret containing the GitHub access token
 
 Resources:
   CodeBuildProject:
