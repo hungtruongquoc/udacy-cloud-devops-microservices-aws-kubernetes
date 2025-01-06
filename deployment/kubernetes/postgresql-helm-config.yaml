@@ -1,0 +1,36 @@
+global:
+  postgresql:
+    auth:
+      postgresPassword: "admin123!"
+      username: "app_user"
+      password: "admin123!"
+      database: "app_database"
+
+primary:
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+    annotations: {}
+    accessModes:
+      - ReadWriteOnce
+
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+architecture: standalone
+
+volumePermissions:
+  enabled: true
+
+securityContext:
+  enabled: true
+  fsGroup: 1001
+
+metrics:
+  enabled: false
