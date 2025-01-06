@@ -728,3 +728,14 @@ psql --host 127.0.0.1 -p 5433 < your_seed_file.sql
 ```
 
 Without port forwarding, you wouldn't be able to access the database from outside the Kubernetes cluster since it's internal to the cluster network.
+
+#### Security Considerations
+The development configuration uses hardcoded credentials for simplicity. 
+
+##### For production:
+
+Use AWS Secrets Manager or AWS Parameter Store
+Implement network policies
+Configure SSL/TLS encryption
+Set up proper IAM roles and permissions
+Enable audit logging
